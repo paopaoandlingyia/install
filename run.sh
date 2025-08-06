@@ -4,10 +4,7 @@
 #
 
 PYTHON_CMD="python3.9"
-MAIN_SCRIPT="canada28_bot.py"
-
-# 确保脚本从其所在目录运行
-cd "$(dirname "$0")"
+MAIN_SCRIPT="$HOME/canada28_bot.py"
 
 # 检查 python 命令是否存在
 if ! command -v $PYTHON_CMD &> /dev/null; then
@@ -23,7 +20,7 @@ fi
 # 检查主脚本是否存在
 if [ ! -f "$MAIN_SCRIPT" ]; then
     echo "错误: 主脚本 '$MAIN_SCRIPT' 不存在。"
-    echo "请确保 run.sh 和 canada28_bot.py 在同一个目录下。"
+    echo "请确保您已经成功运行了 install.sh。"
     exit 1
 fi
 
