@@ -148,11 +148,15 @@ echo -e "   ${C_GREEN}tg-signer login${C_RESET}"
 echo
 print_info "2. 登录成功后, 与您要下注的机器人进行一次任意对话。"
 echo
-print_info "3. ${C_YELLOW}使用新的服务脚本来管理您的机器人:${C_RESET}"
+print_info "3. ${C_YELLOW}运行配置命令来完成初始化设置:${C_RESET}"
+echo -e "   ${C_GREEN}./run.sh config${C_RESET}"
+echo
+print_info "4. ${C_YELLOW}使用以下命令来管理您的机器人:${C_RESET}"
 echo -e "   - 启动机器人 (后台运行): ${C_GREEN}./run.sh start${C_RESET}"
 echo -e "   - 查看实时日志: ${C_GREEN}./run.sh log${C_RESET}"
 echo -e "   - 查看运行状态: ${C_GREEN}./run.sh status${C_RESET}"
 echo -e "   - 停止机器人: ${C_GREEN}./run.sh stop${C_RESET}"
+echo -e "   - 配置机器人: ${C_GREEN}./run.sh config${C_RESET}"
 echo "------------------------------------------------------------------"
 echo
 
