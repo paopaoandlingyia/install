@@ -18,6 +18,7 @@ POLLING_INTERVAL_SECONDS = 2 # 轮询新结果的间隔时间
 RETRY_INTERVAL_SECONDS = 30 # API请求失败后的重试间隔
 AWARD_INTERVAL_SECONDS = 210 # 官方开奖间隔 (3.5分钟)
 POLL_AHEAD_SECONDS = 10 # 提前多少秒开始轮询
+BET_DELAY_SECONDS = 30 # 开奖后等待多少秒再下注，确保盘口开放
 
 def find_latest_chats_file():
     """在 .signer/users/ 目录下查找 latest_chats.json 文件。"""
@@ -86,15 +87,21 @@ def select_chat_interactively():
         except ValueError:
             print("无效的输入，请输入一个数字。")
 
-def initial_setup():
-    """执行首次运行的交互式配置。"""
-    print("\n--- 首次运行配置 ---")
-    
-    chat_id = select_chat_interactively()
+def get_strategy_config(strategy_name):
+    """获取单个策略的配置。"""
+    print(f"\n--- 配置 [{strategy_name}] 玩法 ---")
+    while True:
+        enable = input(f"是否启用 [{strategy_name}] 玩法? (y/n): ").lower()
+        if enable in ['y', 'n']:
+            break
+        print("无效输入，请输入 'y' 或 'n'。")
+
+    if enable == 'n':
+        return {"enabled": False}
 
     while True:
         try:
-            initial_bet = int(input("请输入初始下注金额 (必须是正整数, 例如: 1): "))
+            initial_bet = int(input(f"  - 请输入 [{strategy_name}] 的初始下注金额 (正整数): "))
             if initial_bet > 0:
                 break
             else:
@@ -104,18 +111,32 @@ def initial_setup():
 
     while True:
         try:
-            max_win_streak = int(input("请输入最高连续盈利轮数 (必须是正整数, 例如: 10): "))
+            max_win_streak = int(input(f"  - 请输入 [{strategy_name}] 的最高连续盈利轮数 (正整数): "))
             if max_win_streak > 0:
                 break
             else:
                 print("轮数必须是大于零的正整数。")
         except ValueError:
             print("无效的输入，请输入一个数字。")
-            
+    
+    return {
+        "enabled": True,
+        "initial_bet": initial_bet,
+        "max_win_streak": max_win_streak
+    }
+
+def initial_setup():
+    """执行首次运行的交互式配置。"""
+    print("\n--- 首次运行配置 ---")
+    
+    chat_id = select_chat_interactively()
+
     config = {
         'chat_id': chat_id,
-        'initial_bet': initial_bet,
-        'max_win_streak': max_win_streak
+        'strategies': {
+            'big_small': get_strategy_config('大小'),
+            'odd_even': get_strategy_config('单双')
+        }
     }
 
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
@@ -132,11 +153,13 @@ def load_config():
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
             config = json.load(f)
-        if 'chat_id' in config and 'initial_bet' in config and 'max_win_streak' in config:
+        # 检查新的结构是否完整
+        if 'chat_id' in config and 'strategies' in config and \
+           'big_small' in config['strategies'] and 'odd_even' in config['strategies']:
             print(f"已从 {CONFIG_FILE} 加载配置。")
             return config
         else:
-            print(f"警告: {CONFIG_FILE} 文件不完整，将重新开始配置。")
+            print(f"警告: {CONFIG_FILE} 文件不完整或格式已过时，将重新开始配置。")
             return initial_setup()
     except (json.JSONDecodeError, IOError) as e:
         print(f"警告: 读取 {CONFIG_FILE} 失败: {e}。将重新开始配置。")
@@ -222,57 +245,71 @@ def run_bot(config, state):
 
     # 主循环
     while True:
-        print("\n" + "="*40)
-        print(f"当前状态: 连胜 {state['win_streak']} 场 | 下次下注金额 {state['current_bet']}")
-        
-        # 1. 根据上一期结果，决定并下注本期
-        bet_type = "大" if state['last_period_sum'] >= 14 else "小"
-        bet_amount = state['current_bet']
-        bet_message = f"{bet_type}{bet_amount}"
-        state['last_bet_type'] = bet_type # 记录下注，用于之后核对
+        print("\n" + "="*50)
+        # 打印所有启用策略的当前状态
+        for name, strategy_state in state['strategies'].items():
+            print(f"策略 [{name}]: 连胜 {strategy_state['win_streak']} 场 | 下次下注金额 {strategy_state['current_bet']}")
 
-        print(f"根据上一期和值 [{state['last_period_sum']}], 准备下注: {bet_message}")
-        if not send_bet_command(config['chat_id'], bet_message):
+        # 1. 等待下注盘口开放
+        try:
+            API_TIMEZONE = timezone(timedelta(hours=8))
+            last_award_time_aware = datetime.strptime(f"{datetime.now().year}-{state['last_award_time_str']}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=API_TIMEZONE)
+            betting_opens_time_aware = last_award_time_aware + timedelta(seconds=BET_DELAY_SECONDS)
+            now_aware = datetime.now(API_TIMEZONE)
+            if now_aware < betting_opens_time_aware:
+                delay_duration = (betting_opens_time_aware - now_aware).total_seconds()
+                if delay_duration > 0:
+                    print(f"上一期结果已出，等待 {delay_duration:.1f} 秒以确保盘口开放...")
+                    time.sleep(delay_duration)
+        except (ValueError, KeyError) as e:
+            print(f"警告: 计算下注延迟时出错 ({e})。跳过延迟。")
+
+        # 2. 根据上一期结果，为所有启用的策略生成下注指令
+        bet_messages = []
+        last_sum = state['last_period_sum']
+        
+        # -- 大小策略 --
+        if config['strategies']['big_small']['enabled']:
+            bet_type = "大" if last_sum >= 14 else "小"
+            bet_amount = state['strategies']['big_small']['current_bet']
+            bet_messages.append(f"{bet_type}{bet_amount}")
+        
+        # -- 单双策略 --
+        if config['strategies']['odd_even']['enabled']:
+            bet_type = "双" if last_sum % 2 == 0 else "单"
+            bet_amount = state['strategies']['odd_even']['current_bet']
+            bet_messages.append(f"{bet_type}{bet_amount}")
+
+        if not bet_messages:
+            print("没有启用的下注策略，脚本将暂停。请使用 './run.sh config' 重新配置。")
+            break # 退出主循环
+
+        final_bet_message = " ".join(bet_messages)
+        print(f"根据上一期和值 [{last_sum}], 准备下注: {final_bet_message}")
+        if not send_bet_command(config['chat_id'], final_bet_message):
             print(f"下注失败，将在 {RETRY_INTERVAL_SECONDS} 秒后重试...")
             time.sleep(RETRY_INTERVAL_SECONDS)
-            continue # 如果下注失败，则重新开始本轮循环
+            continue
 
-        # 2. 根据上一期开奖时间，计算并等待到下一期开奖前夕 (时区安全)
+        # 3. 等待下一期开奖
         try:
-            # 定义API所在的时区 (中国标准时间, UTC+8)
             API_TIMEZONE = timezone(timedelta(hours=8))
-
-            # 解析API返回的时间字符串，并附加时区信息使其成为“感知型”时间对象
-            naive_last_award_time = datetime.strptime(f"{datetime.now().year}-{state['last_award_time_str']}", "%Y-%m-%d %H:%M:%S")
-            aware_last_award_time = naive_last_award_time.replace(tzinfo=API_TIMEZONE)
-
-            # 计算下一次开奖时间
+            aware_last_award_time = datetime.strptime(f"{datetime.now().year}-{state['last_award_time_str']}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=API_TIMEZONE)
             aware_next_award_time = aware_last_award_time + timedelta(seconds=AWARD_INTERVAL_SECONDS)
-
-            # 获取当前的UTC时间 (感知型)
             now_utc = datetime.now(timezone.utc)
-            
-            # 将下一次开奖时间也转换为UTC，以便进行 apples-to-apples 比较
             next_award_time_utc = aware_next_award_time.astimezone(timezone.utc)
-            
-            # 计算应该休眠到哪个UTC时间点
             sleep_until_utc = next_award_time_utc - timedelta(seconds=POLL_AHEAD_SECONDS)
-
             if now_utc < sleep_until_utc:
                 sleep_duration = (sleep_until_utc - now_utc).total_seconds()
-                # 为了友好显示，将下次开奖时间转换回API时区进行打印
                 display_next_award_time = next_award_time_utc.astimezone(API_TIMEZONE)
                 display_sleep_until = sleep_until_utc.astimezone(API_TIMEZONE)
-                
                 print(f"下注成功。预计下期开奖时间 (UTC+8): {display_next_award_time.strftime('%H:%M:%S')}")
                 print(f"将休眠 {sleep_duration:.1f} 秒，到 {display_sleep_until.strftime('%H:%M:%S')} (UTC+8) 再开始轮询...")
                 time.sleep(sleep_duration)
             else:
                 print("警告: 计算出的下次轮询时间已过或非常接近，立即开始轮询。")
-
         except ValueError:
             print(f"警告: 无法解析时间 '{state['last_award_time_str']}'。回退到固定时间等待。")
-            # 在时区计算失败时，使用一个安全的、较短的固定等待
             time.sleep(AWARD_INTERVAL_SECONDS - POLL_AHEAD_SECONDS if AWARD_INTERVAL_SECONDS > POLL_AHEAD_SECONDS else 60)
 
         print("休眠结束，开始轮询新一期结果...")
@@ -288,34 +325,50 @@ def run_bot(config, state):
                 print(f"结果未更新 (当前期号 {current_issue})，{POLLING_INTERVAL_SECONDS} 秒后再次查询...")
                 time.sleep(POLLING_INTERVAL_SECONDS)
         
-        # 3. 核对输赢
-        last_bet_was_big = (state['last_bet_type'] == '大')
-        new_result_was_big = (new_result['sum'] >= 14)
+        # 4. 独立核对每个策略的输赢
+        new_sum = new_result['sum']
         
-        print(f"核对结果: 下注[{state['last_bet_type']}], 开奖和值[{new_result['sum']}] -> [{'大' if new_result_was_big else '小'}]")
-
-        if last_bet_was_big == new_result_was_big:
-            print("结果: [胜利]!")
-            state['win_streak'] += 1
-            if state['win_streak'] >= config['max_win_streak']:
-                print(f"达到最大连胜次数 {config['max_win_streak']}！重置金额和连胜。")
-                state['win_streak'] = 0
-                state['current_bet'] = config['initial_bet']
+        # -- 大小策略 --
+        if config['strategies']['big_small']['enabled']:
+            strategy_state = state['strategies']['big_small']
+            last_bet_was_big = ("大" if last_sum >= 14 else "小") == "大"
+            new_result_was_big = new_sum >= 14
+            if last_bet_was_big == new_result_was_big:
+                print("策略 [大小]: [胜利!]")
+                strategy_state['win_streak'] += 1
+                if strategy_state['win_streak'] >= config['strategies']['big_small']['max_win_streak']:
+                    strategy_state['win_streak'] = 0
+                    strategy_state['current_bet'] = config['strategies']['big_small']['initial_bet']
+                else:
+                    strategy_state['current_bet'] *= 2
             else:
-                state['current_bet'] *= 2
-                print(f"连胜 {state['win_streak']} 场，下注金额翻倍至 {state['current_bet']}。")
-        else:
-            print("结果: [失败]!")
-            state['win_streak'] = 0
-            state['current_bet'] = config['initial_bet']
-            print(f"连胜中断，下注金额重置为 {state['current_bet']}。")
+                print("策略 [大小]: [失败!]")
+                strategy_state['win_streak'] = 0
+                strategy_state['current_bet'] = config['strategies']['big_small']['initial_bet']
 
-        # 4. 更新状态，为下一轮做准备
+        # -- 单双策略 --
+        if config['strategies']['odd_even']['enabled']:
+            strategy_state = state['strategies']['odd_even']
+            last_bet_was_even = ("双" if last_sum % 2 == 0 else "单") == "双"
+            new_result_was_even = new_sum % 2 == 0
+            if last_bet_was_even == new_result_was_even:
+                print("策略 [单双]: [胜利!]")
+                strategy_state['win_streak'] += 1
+                if strategy_state['win_streak'] >= config['strategies']['odd_even']['max_win_streak']:
+                    strategy_state['win_streak'] = 0
+                    strategy_state['current_bet'] = config['strategies']['odd_even']['initial_bet']
+                else:
+                    strategy_state['current_bet'] *= 2
+            else:
+                print("策略 [单双]: [失败!]")
+                strategy_state['win_streak'] = 0
+                strategy_state['current_bet'] = config['strategies']['odd_even']['initial_bet']
+
+        # 5. 更新全局状态
         state['last_period_issue'] = new_result['issue']
         state['last_period_sum'] = new_result['sum']
         state['last_award_time_str'] = new_result['time']
         
-        # 在每个周期结束时保存状态
         save_state(state)
 
 
@@ -324,18 +377,29 @@ def load_state(config):
     if Path(STATE_FILE).is_file():
         try:
             with open(STATE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                state = json.load(f)
+            # 简单校验一下状态文件结构
+            if 'strategies' in state and 'big_small' in state['strategies']:
+                 return state
+            else:
+                print(f"警告: 状态文件 {STATE_FILE} 格式不正确。将创建新状态。")
         except (json.JSONDecodeError, IOError) as e:
             print(f"警告: 读取状态文件 {STATE_FILE} 失败: {e}。将创建新状态。")
     
     # 如果文件不存在或读取失败，创建并返回一个全新的状态
+    initial_strategies_state = {}
+    for name, strategy_config in config['strategies'].items():
+        if strategy_config['enabled']:
+            initial_strategies_state[name] = {
+                'current_bet': strategy_config['initial_bet'],
+                'win_streak': 0
+            }
+
     return {
-        'current_bet': config['initial_bet'],
-        'win_streak': 0,
+        'strategies': initial_strategies_state,
         'last_period_sum': None,
         'last_period_issue': None,
         'last_award_time_str': None,
-        'last_bet_type': None
     }
 
 def main():
@@ -358,8 +422,11 @@ def main():
     
     print("\n配置加载成功:")
     print(f"  - 目标 Chat ID: {config['chat_id']}")
-    print(f"  - 初始下注金额: {config['initial_bet']}")
-    print(f"  - 最高盈利轮数: {config['max_win_streak']}")
+    for name, strategy_config in config['strategies'].items():
+        if strategy_config['enabled']:
+            print(f"  - [{name}] 玩法已启用: 初始金额={strategy_config['initial_bet']}, 最大连胜={strategy_config['max_win_streak']}")
+        else:
+            print(f"  - [{name}] 玩法已禁用。")
     
     # 从文件加载状态，或创建新状态
     state = load_state(config)
