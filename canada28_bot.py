@@ -343,7 +343,8 @@ def main():
     # 检查是否只进行配置
     if '--config-only' in sys.argv:
         print("--- 进入交互式配置模式 ---")
-        load_config()
+        # 直接调用 initial_setup() 来强制进行重新配置
+        initial_setup()
         print("\n配置完成。现在您可以使用 './run.sh start' 来启动机器人。")
         sys.exit(0)
 
