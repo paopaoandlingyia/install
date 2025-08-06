@@ -5,14 +5,19 @@ import subprocess
 import requests
 import time
 from pathlib import Path
+from datetime import datetime, timedelta
 
 # --- 全局配置 ---
 HOME_DIR = Path.home()
 CONFIG_FILE = HOME_DIR / 'config.json'
+STATE_FILE = HOME_DIR / 'state.json' # 新增状态文件路径
 SIGNER_DIR = HOME_DIR / '.signer'
 API_URL = 'http://27.106.127.108:9990/ce/apis.php'
-LOOP_INTERVAL_SECONDS = 60 # 主循环间隔时间（秒）
-RETRY_INTERVAL_SECONDS = 30 # 失败或等待新期数时的重试间隔
+# 3.5分钟 = 210秒。我们先等待200秒，然后开始轮询。
+POLLING_INTERVAL_SECONDS = 2 # 轮询新结果的间隔时间
+RETRY_INTERVAL_SECONDS = 30 # API请求失败后的重试间隔
+AWARD_INTERVAL_SECONDS = 210 # 官方开奖间隔 (3.5分钟)
+POLL_AHEAD_SECONDS = 10 # 提前多少秒开始轮询
 
 def find_latest_chats_file():
     """在 .signer/users/ 目录下查找 latest_chats.json 文件。"""
@@ -143,10 +148,11 @@ def get_latest_result():
         response = requests.get(API_URL, timeout=10)
         response.raise_for_status()
         data = response.json()
-        if 'sum' in data and 'time' in data:
+        # 使用新的 'issue' 字段来验证返回数据
+        if 'issue' in data and 'sum' in data and 'time' in data:
             return data
         else:
-            print("警告: API返回的数据格式不正确，缺少 'sum' 或 'time' 字段。")
+            print(f"警告: API返回的数据格式不正确，缺少 'issue', 'sum' 或 'time' 字段。返回内容: {response.text}")
             return None
     except requests.exceptions.RequestException as e:
         print(f"错误: 请求API失败: {e}")
@@ -157,7 +163,15 @@ def get_latest_result():
 
 def send_bet_command(chat_id, message):
     """使用 tg-signer 发送下注命令。"""
-    command = ['tg-signer', 'send-text', '--chat_id', str(chat_id), '--text', message]
+    command = ['tg-signer', 'send-text']
+
+    # 根据 tg-signer 的用法, CHAT_ID 和 TEXT 是位置参数。
+    # 如果 chat_id 是负数, 需要在前面加上 '--' 以防止其被解析为选项。
+    if int(chat_id) < 0:
+        command.append('--')
+    
+    command.extend([str(chat_id), message])
+
     try:
         print(f"执行命令: {' '.join(command)}")
         # 使用 check=True 会在命令失败时抛出异常
@@ -175,72 +189,137 @@ def send_bet_command(chat_id, message):
         print(f"错误输出: {e.stderr}")
         return False
 
+def save_state(state):
+    """将当前状态保存到 state.json 文件。"""
+    try:
+        with open(STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(state, f, indent=4)
+        # print("状态已保存。") # 频繁保存时可以注释掉此行，避免刷屏
+    except IOError as e:
+        print(f"警告: 保存状态到 {STATE_FILE} 失败: {e}")
+
 def run_bot(config, state):
     """运行机器人的主循环。"""
     print("\n--- 机器人开始运行 (按 Ctrl+C 退出) ---")
+
+    # 如果状态是新创建的（没有上一期记录），则需要先获取一次初始结果
+    if not state.get('last_period_issue'):
+        print("未找到历史状态，正在获取初始开奖结果...")
+        while True:
+            initial_result = get_latest_result()
+            if initial_result:
+                state['last_period_issue'] = initial_result['issue']
+                state['last_period_sum'] = initial_result['sum']
+                state['last_award_time_str'] = initial_result['time']
+                print(f"获取到初始结果: 期号={state['last_period_issue']}, 和值={state['last_period_sum']}, 时间={state['last_award_time_str']}")
+                save_state(state) # 保存初始状态
+                break
+            else:
+                print(f"获取初始结果失败，{RETRY_INTERVAL_SECONDS} 秒后重试...")
+                time.sleep(RETRY_INTERVAL_SECONDS)
+    else:
+        print("成功从 state.json 加载历史状态。")
+
+    # 主循环
     while True:
         print("\n" + "="*40)
         print(f"当前状态: 连胜 {state['win_streak']} 场 | 下次下注金额 {state['current_bet']}")
         
-        print("正在获取最新开奖结果...")
-        result = get_latest_result()
+        # 1. 根据上一期结果，决定并下注本期
+        bet_type = "大" if state['last_period_sum'] >= 14 else "小"
+        bet_amount = state['current_bet']
+        bet_message = f"{bet_type}{bet_amount}"
+        state['last_bet_type'] = bet_type # 记录下注，用于之后核对
 
-        if not result:
-            print(f"获取结果失败，将在 {RETRY_INTERVAL_SECONDS} 秒后重试...")
+        print(f"根据上一期和值 [{state['last_period_sum']}], 准备下注: {bet_message}")
+        if not send_bet_command(config['chat_id'], bet_message):
+            print(f"下注失败，将在 {RETRY_INTERVAL_SECONDS} 秒后重试...")
             time.sleep(RETRY_INTERVAL_SECONDS)
-            continue
+            continue # 如果下注失败，则重新开始本轮循环
 
-        if result['time'] == state['last_period_time']:
-            print(f"等待新的开奖结果... (当前期数: {result['time']})")
-            time.sleep(RETRY_INTERVAL_SECONDS)
-            continue
-        
-        previous_sum = state['last_period_sum']
-        previous_bet_type = state.get('last_bet_type')
-        
-        state['last_period_sum'] = result['sum']
-        state['last_period_time'] = result['time']
-        print(f"获取到新结果: 时间={result['time']}, 和值={result['sum']}")
-
-        # 从第二次循环开始，根据上一期的结果判断输赢
-        if previous_sum is not None and previous_bet_type is not None:
-            last_bet_was_big = (previous_bet_type == '大')
-            last_result_was_big = (previous_sum >= 14)
+        # 2. 根据上一期开奖时间，计算并等待到下一期开奖前夕
+        try:
+            # 解析时间字符串，注意它没有年份，我们假设是当前年份
+            last_award_time = datetime.strptime(f"{datetime.now().year}-{state['last_award_time_str']}", "%Y-%m-%d %H:%M:%S")
+            next_award_time = last_award_time + timedelta(seconds=AWARD_INTERVAL_SECONDS)
             
-            print(f"核对上一期结果: 下注[{previous_bet_type}], 开奖和值[{previous_sum}] -> [{'大' if last_result_was_big else '小'}]")
-
-            if last_bet_was_big == last_result_was_big:
-                print("结果: [胜利]!")
-                state['win_streak'] += 1
-                if state['win_streak'] >= config['max_win_streak']:
-                    print(f"达到最大连胜次数 {config['max_win_streak']}！重置金额和连胜。")
-                    state['win_streak'] = 0
-                    state['current_bet'] = config['initial_bet']
-                else:
-                    state['current_bet'] *= 2
-                    print(f"连胜 {state['win_streak']} 场，下注金额翻倍至 {state['current_bet']}。")
+            now = datetime.now()
+            sleep_until = next_award_time - timedelta(seconds=POLL_AHEAD_SECONDS)
+            
+            if now < sleep_until:
+                sleep_duration = (sleep_until - now).total_seconds()
+                print(f"下注成功。预计下期开奖时间: {next_award_time.strftime('%H:%M:%S')}")
+                print(f"将休眠 {sleep_duration:.1f} 秒，到 {sleep_until.strftime('%H:%M:%S')} 再开始轮询...")
+                time.sleep(sleep_duration)
             else:
-                print("结果: [失败]!")
+                print("警告: 计算出的下次轮询时间已过，立即开始轮询。")
+
+        except ValueError:
+            print(f"警告: 无法解析时间 '{state['last_award_time_str']}'。回退到固定时间等待。")
+            time.sleep(AWARD_INTERVAL_SECONDS - POLL_AHEAD_SECONDS)
+
+        print("休眠结束，开始轮询新一期结果...")
+        new_result = None
+        while True:
+            result = get_latest_result()
+            if result and result['issue'] != state['last_period_issue']:
+                new_result = result
+                print(f"获取到新一期结果: 期号={new_result['issue']}, 和值={new_result['sum']}")
+                break
+            else:
+                current_issue = state['last_period_issue'] if not result else result['issue']
+                print(f"结果未更新 (当前期号 {current_issue})，{POLLING_INTERVAL_SECONDS} 秒后再次查询...")
+                time.sleep(POLLING_INTERVAL_SECONDS)
+        
+        # 3. 核对输赢
+        last_bet_was_big = (state['last_bet_type'] == '大')
+        new_result_was_big = (new_result['sum'] >= 14)
+        
+        print(f"核对结果: 下注[{state['last_bet_type']}], 开奖和值[{new_result['sum']}] -> [{'大' if new_result_was_big else '小'}]")
+
+        if last_bet_was_big == new_result_was_big:
+            print("结果: [胜利]!")
+            state['win_streak'] += 1
+            if state['win_streak'] >= config['max_win_streak']:
+                print(f"达到最大连胜次数 {config['max_win_streak']}！重置金额和连胜。")
                 state['win_streak'] = 0
                 state['current_bet'] = config['initial_bet']
-                print(f"连胜中断，下注金额重置为 {state['current_bet']}。")
-
-        # 准备本期的下注指令
-        current_bet_type = "大" if result['sum'] >= 14 else "小"
-        bet_amount = state['current_bet']
-        bet_message = f"{current_bet_type}{bet_amount}"
-        
-        state['last_bet_type'] = current_bet_type # 记录本次下注类型以备下次核对
-
-        print(f"准备下注: {bet_message}")
-        
-        if send_bet_command(config['chat_id'], bet_message):
-            print(f"下注成功，等待 {LOOP_INTERVAL_SECONDS} 秒进入下一轮...")
-            time.sleep(LOOP_INTERVAL_SECONDS)
+            else:
+                state['current_bet'] *= 2
+                print(f"连胜 {state['win_streak']} 场，下注金额翻倍至 {state['current_bet']}。")
         else:
-            print(f"下注失败，将在 {RETRY_INTERVAL_SECONDS} 秒后重试...")
-            # 如果发送失败，不更新状态，直接重试
-            time.sleep(RETRY_INTERVAL_SECONDS)
+            print("结果: [失败]!")
+            state['win_streak'] = 0
+            state['current_bet'] = config['initial_bet']
+            print(f"连胜中断，下注金额重置为 {state['current_bet']}。")
+
+        # 4. 更新状态，为下一轮做准备
+        state['last_period_issue'] = new_result['issue']
+        state['last_period_sum'] = new_result['sum']
+        state['last_award_time_str'] = new_result['time']
+        
+        # 在每个周期结束时保存状态
+        save_state(state)
+
+
+def load_state(config):
+    """加载状态，如果文件不存在或无效，则创建新状态。"""
+    if Path(STATE_FILE).is_file():
+        try:
+            with open(STATE_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            print(f"警告: 读取状态文件 {STATE_FILE} 失败: {e}。将创建新状态。")
+    
+    # 如果文件不存在或读取失败，创建并返回一个全新的状态
+    return {
+        'current_bet': config['initial_bet'],
+        'win_streak': 0,
+        'last_period_sum': None,
+        'last_period_issue': None,
+        'last_award_time_str': None,
+        'last_bet_type': None
+    }
 
 def main():
     """主函数"""
@@ -251,14 +330,8 @@ def main():
     print(f"  - 初始下注金额: {config['initial_bet']}")
     print(f"  - 最高盈利轮数: {config['max_win_streak']}")
     
-    # 初始化状态
-    state = {
-        'current_bet': config['initial_bet'],
-        'win_streak': 0,
-        'last_period_sum': None,
-        'last_period_time': None,
-        'last_bet_type': None
-    }
+    # 从文件加载状态，或创建新状态
+    state = load_state(config)
     
     try:
         run_bot(config, state)
