@@ -59,8 +59,9 @@ case "$1" in
             exit 1
         fi
 
-        # 使用 nohup 在后台启动，并将标准输出和错误输出重定向到日志文件
-        nohup "$PYTHON_CMD" "$MAIN_SCRIPT_PATH" > "$LOG_FILE" 2>&1 &
+        # 使用 nohup 在后台启动，-u 参数强制python使用无缓冲的stdout/stderr
+        # 这能确保日志被实时写入文件，而不是被缓存
+        nohup "$PYTHON_CMD" -u "$MAIN_SCRIPT_PATH" > "$LOG_FILE" 2>&1 &
         
         # 短暂等待后再次检查，确保启动成功
         sleep 2
