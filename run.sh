@@ -8,13 +8,9 @@ MAIN_SCRIPT="$HOME/canada28_bot.py"
 
 # 检查 python 命令是否存在
 if ! command -v $PYTHON_CMD &> /dev/null; then
-    echo "错误: 未找到 '$PYTHON_CMD' 命令。尝试使用 'python3'..."
-    PYTHON_CMD="python3"
-    if ! command -v $PYTHON_CMD &> /dev/null; then
-        echo "错误: 也未找到 'python3' 命令。"
-        echo "请确保您已经成功运行了 install.sh 并正确配置了环境。"
-        exit 1
-    fi
+    echo "错误: 未找到 '$PYTHON_CMD' 命令。"
+    echo "请确保您已经成功运行了 install.sh 并正确配置了环境。"
+    exit 1
 fi
 
 # 检查主脚本是否存在
