@@ -3,12 +3,12 @@
 # 自动化部署与环境安装脚本 (专为Linux设计)
 #
 # 使用方法:
-# bash -c "$(curl -fsSL https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main/install.sh)"
+# bash -c "$(curl -fsSL https://raw.githubusercontent.com/paopaoandlingyia/install/main/install.sh)"
 #
 
 # --- 配置 ---
 # !!! 请将下面的地址替换为您自己仓库的 raw 文件地址 !!!
-REPO_BASE_URL="https://raw.githubusercontent.com/YOUR_USERNAME/YOUR_REPO/main"
+REPO_BASE_URL="https://raw.githubusercontent.com/paopaoandlingyia/install/main"
 INSTALL_DIR="$HOME/canada28_bot"
 FILES_TO_DOWNLOAD=("run.sh" "canada28_bot.py")
 
@@ -71,53 +71,71 @@ else
     exit 1
 fi
 
-# 2. 安装Python和pip
-print_info "正在安装 Python 3.9+ 和 pip..."
-# 检查一个常见的python3.9命令是否存在
-if ! command -v python3.9 &> /dev/null; then
-    print_info "未找到 python3.9，尝试自动安装..."
-    # 切换到root权限执行安装
+# 4. 检查并配置Python环境
+PYTHON_CMD=""
+
+# 检查系统现有的python3版本是否满足要求
+function check_existing_python() {
+    print_info "正在检查现有的 Python 3 版本..."
+    if ! command -v python3 &> /dev/null; then
+        print_info "未找到 'python3' 命令。"
+        return 1
+    fi
+
+    PY_VERSION=$("python3" -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
+    PY_MAJOR=$(echo "$PY_VERSION" | cut -d. -f1)
+    PY_MINOR=$(echo "$PY_VERSION" | cut -d. -f2)
+
+    if [[ "$PY_MAJOR" -lt 3 || ("$PY_MAJOR" -eq 3 && "$PY_MINOR" -lt 9) ]]; then
+        print_warn "找到的 Python 版本 ($PY_VERSION) 过低，需要 >= 3.9。"
+        return 1
+    else
+        print_success "检测到符合要求的 Python 版本: $PY_VERSION"
+        PYTHON_CMD="python3"
+        return 0
+    fi
+}
+
+# 主安装逻辑
+print_info "正在配置 Python 环境..."
+if check_existing_python; then
+    print_info "使用系统中已有的 Python 环境。"
+else
+    print_info "需要安装或升级 Python。尝试自动安装..."
     if [[ $EUID -ne 0 ]]; then
        print_info "需要 root 权限来安装软件包，请输入您的密码。"
-       # 使用 sudo -v 预先获取权限
-       sudo -v
-       if [ $? -ne 0 ]; then
-           print_error "获取 root 权限失败，请以 root 用户或使用 sudo 运行此脚本。"
-           exit 1
-       fi
+       sudo -v || { print_error "获取 root 权限失败。"; exit 1; }
     fi
 
     case $PKG_MANAGER in
         apt)
             sudo apt-get update
-            sudo apt-get install -y python3.9 python3.9-venv python3-pip
+            # 安装通用的python3包，而不是指定版本
+            sudo apt-get install -y python3 python3-venv python3-pip
             ;;
-        dnf)
-            sudo dnf install -y python39
-            ;;
-        yum)
-            print_error "CentOS 7/8 的自动安装较为复杂，建议您手动安装 Python 3.9+ 后再运行此脚本。"
-            exit 1
+        dnf|yum)
+            # dnf/yum 通常直接提供 python3 包
+            sudo "$PKG_MANAGER" install -y python3
             ;;
     esac
+
     if [ $? -ne 0 ]; then
-        print_error "Python 安装失败。请检查错误信息并尝试手动安装。"
+        print_error "Python 自动安装失败。请检查错误信息并尝试手动安装。"
         exit 1
     fi
-    print_success "Python 安装成功。"
-else
-    print_info "已检测到 Python 3.9+。"
+    print_success "Python 安装/更新成功。"
+    # 再次检查以确认
+    check_existing_python || { print_error "安装后仍无法找到合适的Python版本。"; exit 1; }
 fi
 
-# 确保python3命令指向新版本
-PYTHON_CMD="python3.9"
-if ! command -v $PYTHON_CMD &> /dev/null; then
-    PYTHON_CMD="python3" # 回退到 python3
-fi
-
-# 3. 安装Python库
+# 5. 安装Python库
 print_info "正在使用 pip 安装必要的 Python 库 (tg-signer, requests)..."
-if ! $PYTHON_CMD -m pip install -U tg-signer requests; then
+if [ -z "$PYTHON_CMD" ]; then
+    print_error "未能确定要使用的 Python 命令，无法安装库。脚本无法继续。"
+    exit 1
+fi
+
+if ! "$PYTHON_CMD" -m pip install -U tg-signer requests; then
     print_error "使用 pip 安装库失败。请检查pip配置和网络连接。"
     exit 1
 fi
