@@ -323,6 +323,19 @@ def load_state(config):
 
 def main():
     """主函数"""
+    # 检查是否只进行配置
+    if '--config-only' in sys.argv:
+        print("--- 进入交互式配置模式 ---")
+        load_config()
+        print("\n配置完成。现在您可以使用 './run.sh start' 来启动机器人。")
+        sys.exit(0)
+
+    # 检查配置文件是否存在，如果不存在则提示用户
+    if not Path(CONFIG_FILE).is_file():
+        print("错误: 配置文件 'config.json' 不存在。")
+        print("请先运行 './run.sh config' 来进行初始化配置。")
+        sys.exit(1)
+
     config = load_config()
     
     print("\n配置加载成功:")
