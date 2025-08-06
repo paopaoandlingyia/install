@@ -158,7 +158,7 @@ echo -e "   (系统会提示您输入手机号、密码和验证码)"
 echo -e "   ${C_YELLOW}重要提示: 输入手机号时，请务必包含国家代码，例如: +861234567890${C_RESET}"
 echo -e "   ${C_GREEN}tg-signer login${C_RESET}"
 echo
-print_info "2. 登录成功后, 与您要下注的机器人进行一次任意对话。"
+print_info "2. 确保机器人在您的对话列表。"
 echo
 print_info "3. 最后, 运行启动脚本来开始自动下注:"
 echo -e "   (如果不在主目录, 请使用 'cd ~' 命令返回)"
