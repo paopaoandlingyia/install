@@ -9,7 +9,8 @@
 # --- 配置 ---
 # !!! 请将下面的地址替换为您自己仓库的 raw 文件地址 !!!
 REPO_BASE_URL="https://raw.githubusercontent.com/paopaoandlingyia/install/main"
-INSTALL_DIR="$HOME/canada28_bot"
+# 将文件直接安装到用户主目录
+INSTALL_DIR="$HOME"
 FILES_TO_DOWNLOAD=("run.sh" "canada28_bot.py")
 
 # --- 颜色定义 ---
@@ -39,9 +40,10 @@ echo "============================================="
 echo
 
 # 1. 创建并进入安装目录
-print_info "将在 '$INSTALL_DIR' 目录中安装机器人..."
+print_info "将在您的主目录 ('$INSTALL_DIR') 中安装机器人脚本..."
+# 确保主目录存在并进入
 mkdir -p "$INSTALL_DIR"
-cd "$INSTALL_DIR" || { print_error "无法创建或进入目录 '$INSTALL_DIR'。"; exit 1; }
+cd "$INSTALL_DIR" || { print_error "无法进入主目录 '$INSTALL_DIR'。"; exit 1; }
 
 # 2. 下载必要的脚本文件
 print_info "正在从GitHub仓库下载脚本文件..."
@@ -151,15 +153,15 @@ echo "------------------------------------------------------------------"
 print_success "部署与环境配置全部完成!"
 echo
 print_info "下一步操作:"
-echo -e "1. ${C_YELLOW}请进入您的专属目录:${C_RESET}"
-echo -e "   ${C_GREEN}cd $INSTALL_DIR${C_RESET}"
-echo
-echo -e "2. ${C_YELLOW}运行以下命令登录您的 Telegram 账户:${C_RESET}"
+echo -e "1. ${C_YELLOW}请运行以下命令登录您的 Telegram 账户:${C_RESET}"
+echo -e "   (系统会提示您输入手机号、密码和验证码)"
+echo -e "   ${C_YELLOW}重要提示: 输入手机号时，请务必包含国家代码，例如: +861234567890${C_RESET}"
 echo -e "   ${C_GREEN}tg-signer login${C_RESET}"
 echo
-print_info "3. 登录成功后, 与您要下注的机器人进行一次任意对话。"
+print_info "2. 登录成功后, 与您要下注的机器人进行一次任意对话。"
 echo
-print_info "4. 最后, 运行启动脚本来开始自动下注:"
+print_info "3. 最后, 运行启动脚本来开始自动下注:"
+echo -e "   (如果不在主目录, 请使用 'cd ~' 命令返回)"
 echo -e "   ${C_GREEN}./run.sh${C_RESET}"
 echo "------------------------------------------------------------------"
 echo
