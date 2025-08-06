@@ -5,7 +5,7 @@ import subprocess
 import requests
 import time
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 # --- 全局配置 ---
 HOME_DIR = Path.home()
@@ -237,26 +237,43 @@ def run_bot(config, state):
             time.sleep(RETRY_INTERVAL_SECONDS)
             continue # 如果下注失败，则重新开始本轮循环
 
-        # 2. 根据上一期开奖时间，计算并等待到下一期开奖前夕
+        # 2. 根据上一期开奖时间，计算并等待到下一期开奖前夕 (时区安全)
         try:
-            # 解析时间字符串，注意它没有年份，我们假设是当前年份
-            last_award_time = datetime.strptime(f"{datetime.now().year}-{state['last_award_time_str']}", "%Y-%m-%d %H:%M:%S")
-            next_award_time = last_award_time + timedelta(seconds=AWARD_INTERVAL_SECONDS)
+            # 定义API所在的时区 (中国标准时间, UTC+8)
+            API_TIMEZONE = timezone(timedelta(hours=8))
+
+            # 解析API返回的时间字符串，并附加时区信息使其成为“感知型”时间对象
+            naive_last_award_time = datetime.strptime(f"{datetime.now().year}-{state['last_award_time_str']}", "%Y-%m-%d %H:%M:%S")
+            aware_last_award_time = naive_last_award_time.replace(tzinfo=API_TIMEZONE)
+
+            # 计算下一次开奖时间
+            aware_next_award_time = aware_last_award_time + timedelta(seconds=AWARD_INTERVAL_SECONDS)
+
+            # 获取当前的UTC时间 (感知型)
+            now_utc = datetime.now(timezone.utc)
             
-            now = datetime.now()
-            sleep_until = next_award_time - timedelta(seconds=POLL_AHEAD_SECONDS)
+            # 将下一次开奖时间也转换为UTC，以便进行 apples-to-apples 比较
+            next_award_time_utc = aware_next_award_time.astimezone(timezone.utc)
             
-            if now < sleep_until:
-                sleep_duration = (sleep_until - now).total_seconds()
-                print(f"下注成功。预计下期开奖时间: {next_award_time.strftime('%H:%M:%S')}")
-                print(f"将休眠 {sleep_duration:.1f} 秒，到 {sleep_until.strftime('%H:%M:%S')} 再开始轮询...")
+            # 计算应该休眠到哪个UTC时间点
+            sleep_until_utc = next_award_time_utc - timedelta(seconds=POLL_AHEAD_SECONDS)
+
+            if now_utc < sleep_until_utc:
+                sleep_duration = (sleep_until_utc - now_utc).total_seconds()
+                # 为了友好显示，将下次开奖时间转换回API时区进行打印
+                display_next_award_time = next_award_time_utc.astimezone(API_TIMEZONE)
+                display_sleep_until = sleep_until_utc.astimezone(API_TIMEZONE)
+                
+                print(f"下注成功。预计下期开奖时间 (UTC+8): {display_next_award_time.strftime('%H:%M:%S')}")
+                print(f"将休眠 {sleep_duration:.1f} 秒，到 {display_sleep_until.strftime('%H:%M:%S')} (UTC+8) 再开始轮询...")
                 time.sleep(sleep_duration)
             else:
-                print("警告: 计算出的下次轮询时间已过，立即开始轮询。")
+                print("警告: 计算出的下次轮询时间已过或非常接近，立即开始轮询。")
 
         except ValueError:
             print(f"警告: 无法解析时间 '{state['last_award_time_str']}'。回退到固定时间等待。")
-            time.sleep(AWARD_INTERVAL_SECONDS - POLL_AHEAD_SECONDS)
+            # 在时区计算失败时，使用一个安全的、较短的固定等待
+            time.sleep(AWARD_INTERVAL_SECONDS - POLL_AHEAD_SECONDS if AWARD_INTERVAL_SECONDS > POLL_AHEAD_SECONDS else 60)
 
         print("休眠结束，开始轮询新一期结果...")
         new_result = None
