@@ -7,8 +7,9 @@ import time
 from pathlib import Path
 
 # --- 全局配置 ---
-CONFIG_FILE = 'config.json'
-SIGNER_DIR = '.signer'
+HOME_DIR = Path.home()
+CONFIG_FILE = HOME_DIR / 'config.json'
+SIGNER_DIR = HOME_DIR / '.signer'
 API_URL = 'http://27.106.127.108:9990/ce/apis.php'
 LOOP_INTERVAL_SECONDS = 60 # 主循环间隔时间（秒）
 RETRY_INTERVAL_SECONDS = 30 # 失败或等待新期数时的重试间隔
