@@ -4,166 +4,112 @@ import sys
 import subprocess
 import requests
 import time
+import random
+import threading
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
-# --- 全局配置 ---
+# --- 全局/路径配置 ---
 HOME_DIR = Path.home()
 CONFIG_FILE = HOME_DIR / 'config.json'
-STATE_FILE = HOME_DIR / 'state.json' # 新增状态文件路径
+STATE_FILE = HOME_DIR / 'state.json'
 SIGNER_DIR = HOME_DIR / '.signer'
+
+# --- 业务常量 ---
 API_URL = 'http://27.106.127.108:9990/ce/apis.php'
-# 3.5分钟 = 210秒。我们先等待200秒，然后开始轮询。
-POLLING_INTERVAL_SECONDS = 2 # 轮询新结果的间隔时间
-RETRY_INTERVAL_SECONDS = 30 # API请求失败后的重试间隔
-AWARD_INTERVAL_SECONDS = 210 # 官方开奖间隔 (3.5分钟)
-POLL_AHEAD_SECONDS = 10 # 提前多少秒开始轮询
-BET_DELAY_SECONDS = 30 # 开奖后等待多少秒再下注，确保盘口开放
+POLLING_INTERVAL_SECONDS = 2   # 轮询新结果的间隔
+RETRY_INTERVAL_SECONDS = 30    # API请求失败后的重试间隔
+AWARD_INTERVAL_SECONDS = 210   # 官方开奖间隔 (3.5分钟)
+POLL_AHEAD_SECONDS = 10        # 提前多少秒开始轮询
+BET_DELAY_SECONDS = 30         # 开奖后等待多少秒再下注，确保盘口开放
 
-def find_latest_chats_file():
-    """在 .signer/users/ 目录下查找 latest_chats.json 文件。"""
-    # 使用 Pathlib 提高路径操作的健壮性
-    signer_path = Path(SIGNER_DIR)
-    users_dir = signer_path / 'users'
-    
-    if not users_dir.is_dir():
-        return None
-
-    # 查找所有用户子目录
-    user_subdirs = [d for d in users_dir.iterdir() if d.is_dir()]
-    if not user_subdirs:
-        return None
-
-    # 优先选择修改时间最新的用户目录
-    latest_user_dir = max(user_subdirs, key=lambda p: p.stat().st_mtime)
-    chats_file = latest_user_dir / 'latest_chats.json'
-
-    if chats_file.is_file():
-        print(f"找到聊天记录文件: {chats_file}")
-        return chats_file
-    return None
-
-def select_chat_interactively():
-    """交互式地让用户选择一个 chat_id。"""
-    chats_file = find_latest_chats_file()
-    if not chats_file:
-        print("\n错误：在 .signer 目录中找不到任何 tg-signer 用户信息。")
-        print("请确保您已经完成以下步骤：")
-        print("1. 成功运行了 'tg-signer login' 并登录了您的账户。")
-        print("2. 与您想下注的机器人或群组进行过至少一次对话。")
-        sys.exit(1)
-
-    with open(chats_file, 'r', encoding='utf-8') as f:
-        try:
-            chats = json.load(f)
-        except json.JSONDecodeError:
-            print(f"错误：无法解析聊天记录文件 {chats_file}。文件可能已损坏。")
-            sys.exit(1)
-
-    if not chats:
-        print("错误：最近的对话列表为空。请先与您的目标机器人进行一次对话。")
-        sys.exit(1)
-
-    print("\n检测到以下最近对话，请选择您要下注的目标：")
-    for i, chat in enumerate(chats):
-        # 优先使用 title，否则尝试拼接 first_name 和 last_name
-        title = chat.get('title')
-        if not title:
-            first_name = chat.get('first_name', '')
-            last_name = chat.get('last_name', '')
-            title = f"{first_name} {last_name}".strip()
-        if not title:
-            title = f"未知对话 (ID: {chat['id']})"
-        print(f"  {i + 1}: {title} (ID: {chat['id']})")
-
-    while True:
-        try:
-            choice_str = input(f"\n请输入选择的编号 (1-{len(chats)}): ")
-            choice = int(choice_str)
-            if 1 <= choice <= len(chats):
-                return chats[choice - 1]['id']
-            else:
-                print(f"无效的输入，请输入 1 到 {len(chats)} 之间的数字。")
-        except ValueError:
-            print("无效的输入，请输入一个数字。")
-
-def get_strategy_config(strategy_name):
-    """获取单个策略的配置。"""
-    print(f"\n--- 配置 [{strategy_name}] 玩法 ---")
-    while True:
-        enable = input(f"是否启用 [{strategy_name}] 玩法? (y/n): ").lower()
-        if enable in ['y', 'n']:
-            break
-        print("无效输入，请输入 'y' 或 'n'。")
-
-    if enable == 'n':
-        return {"enabled": False}
-
-    while True:
-        try:
-            initial_bet = int(input(f"  - 请输入 [{strategy_name}] 的初始下注金额 (正整数): "))
-            if initial_bet > 0:
-                break
-            else:
-                print("金额必须是大于零的正整数。")
-        except ValueError:
-            print("无效的输入，请输入一个数字。")
-
-    while True:
-        try:
-            max_win_streak = int(input(f"  - 请输入 [{strategy_name}] 的最高连续盈利轮数 (正整数): "))
-            if max_win_streak > 0:
-                break
-            else:
-                print("轮数必须是大于零的正整数。")
-        except ValueError:
-            print("无效的输入，请输入一个数字。")
-    
-    return {
-        "enabled": True,
-        "initial_bet": initial_bet,
-        "max_win_streak": max_win_streak
-    }
-
-def initial_setup():
-    """执行首次运行的交互式配置。"""
-    print("\n--- 首次运行配置 ---")
-    
-    chat_id = select_chat_interactively()
-
-    config = {
-        'chat_id': chat_id,
-        'strategies': {
-            'big_small': get_strategy_config('大小'),
-            'odd_even': get_strategy_config('单双')
+# 轻量版默认配置（首次启动或缺失字段时写入/补齐）
+DEFAULT_CONFIG = {
+    "web": {
+        "port": 8787,
+        "auth": {
+            "username": "admin",
+            "password": "admin123"
         }
-    }
+    },
+    # 账户池：[{ alias, display_name, chat_id, enabled }]
+    "accounts": [],
+    # 策略与旧版结构保持兼容
+    "strategies": {
+        "big_small": {
+            "enabled": False,
+            "initial_bet": 1,
+            "max_win_streak": 3
+        },
+        "odd_even": {
+            "enabled": False,
+            "initial_bet": 1,
+            "max_win_streak": 3
+        }
+    },
+    # 旧版单一 chat_id（兼容模式，无账户池时仍可使用）
+    "chat_id": None
+}
 
-    with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-        json.dump(config, f, indent=4)
-    
-    print(f"\n配置已成功保存到 {CONFIG_FILE}。")
-    return config
 
-def load_config():
-    """加载配置，如果配置文件不存在或不完整则执行首次配置。"""
-    if not Path(CONFIG_FILE).is_file():
-        return initial_setup()
-    
+def atomic_write_json(path: Path, data: dict):
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    with open(tmp, 'w', encoding='utf-8') as f:
+        json.dump(data, f, indent=4, ensure_ascii=False)
+    tmp.replace(path)
+
+
+def ensure_default_config(cfg: dict) -> dict:
+    """将缺失的默认字段补齐，不覆盖已有值。"""
+    # web
+    cfg.setdefault("web", {})
+    cfg["web"].setdefault("port", DEFAULT_CONFIG["web"]["port"])
+    cfg["web"].setdefault("auth", {})
+    cfg["web"]["auth"].setdefault("username", DEFAULT_CONFIG["web"]["auth"]["username"])
+    cfg["web"]["auth"].setdefault("password", DEFAULT_CONFIG["web"]["auth"]["password"])
+    # accounts
+    cfg.setdefault("accounts", [])
+    # strategies
+    cfg.setdefault("strategies", {})
+    for k, v in DEFAULT_CONFIG["strategies"].items():
+        cfg["strategies"].setdefault(k, {})
+        for sk, sv in v.items():
+            cfg["strategies"][k].setdefault(sk, sv)
+    # legacy chat_id
+    cfg.setdefault("chat_id", None)
+    return cfg
+
+
+def load_config() -> dict:
+    """加载配置，如果不存在则创建默认配置；若缺字段则补齐。"""
+    if not CONFIG_FILE.is_file():
+        cfg = ensure_default_config({})
+        atomic_write_json(CONFIG_FILE, cfg)
+        print(f"已创建默认配置: {CONFIG_FILE}")
+        return cfg
+
     try:
         with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            config = json.load(f)
-        # 检查新的结构是否完整
-        if 'chat_id' in config and 'strategies' in config and \
-           'big_small' in config['strategies'] and 'odd_even' in config['strategies']:
-            print(f"已从 {CONFIG_FILE} 加载配置。")
-            return config
-        else:
-            print(f"警告: {CONFIG_FILE} 文件不完整或格式已过时，将重新开始配置。")
-            return initial_setup()
-    except (json.JSONDecodeError, IOError) as e:
-        print(f"警告: 读取 {CONFIG_FILE} 失败: {e}。将重新开始配置。")
-        return initial_setup()
+            cfg = json.load(f)
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"警告: 读取配置失败({e})，写入并使用默认配置。")
+        cfg = {}
+    cfg = ensure_default_config(cfg)
+    # 将补齐的字段写回
+    try:
+        atomic_write_json(CONFIG_FILE, cfg)
+    except OSError as e:
+        print(f"警告: 无法写回配置文件: {e}")
+    return cfg
+
+
+def save_state(state: dict):
+    """保存运行时 state.json"""
+    try:
+        atomic_write_json(STATE_FILE, state)
+    except OSError as e:
+        print(f"警告: 保存状态失败: {e}")
+
 
 def get_latest_result():
     """从API获取最新的开奖结果。"""
@@ -171,225 +117,68 @@ def get_latest_result():
         response = requests.get(API_URL, timeout=10)
         response.raise_for_status()
         data = response.json()
-        # 使用新的 'issue' 字段来验证返回数据
         if 'issue' in data and 'sum' in data and 'time' in data:
             return data
         else:
-            print(f"警告: API返回的数据格式不正确，缺少 'issue', 'sum' 或 'time' 字段。返回内容: {response.text}")
+            print(f"警告: API返回的数据格式不正确，缺少 'issue', 'sum' 或 'time'。返回: {response.text}")
             return None
     except requests.exceptions.RequestException as e:
         print(f"错误: 请求API失败: {e}")
         return None
     except json.JSONDecodeError:
-        print(f"错误: 解析API返回的JSON数据失败。内容: {response.text}")
+        print(f"错误: 解析API返回的JSON失败。")
         return None
 
-def send_bet_command(chat_id, message):
-    """使用 tg-signer 发送下注命令。"""
-    command = ['tg-signer', 'send-text']
 
-    # 根据 tg-signer 的用法, CHAT_ID 和 TEXT 是位置参数。
-    # 如果 chat_id 是负数, 需要在前面加上 '--' 以防止其被解析为选项。
+def send_bet_command(alias: str, chat_id: str, message: str) -> bool:
+    """
+    使用 tg-signer 发送下注命令。
+    - 指定账户别名 alias（-a）
+    - 按注独立，逐条发送
+    - 兼容负 chat_id 时添加 '--'
+    """
+    command = ['tg-signer']
+    if alias:
+        command.extend(['-a', str(alias)])
+    command.append('send-text')
+
     if int(chat_id) < 0:
         command.append('--')
-    
+
     command.extend([str(chat_id), message])
 
     try:
         print(f"执行命令: {' '.join(command)}")
-        # 使用 check=True 会在命令失败时抛出异常
-        result = subprocess.run(command, capture_output=True, text=True, check=True, encoding='utf-8')
-        print("命令执行成功。")
+        subprocess.run(command, capture_output=True, text=True, check=True, encoding='utf-8')
+        print("命令执行成功")
         return True
     except FileNotFoundError:
-        print("\n错误: 'tg-signer' 命令未找到。")
-        print("请确保您已成功运行 install.sh 并且 'tg-signer' 在您的系统路径中。")
+        print("\n错误: 未找到 'tg-signer' 命令，请先安装并确保在 PATH 中。")
         return False
     except subprocess.CalledProcessError as e:
-        print(f"\n错误: 执行 tg-signer 命令失败。")
-        print(f"返回码: {e.returncode}")
-        print(f"输出: {e.stdout}")
-        print(f"错误输出: {e.stderr}")
+        print(f"\n错误: tg-signer 执行失败。code={e.returncode}")
+        print(f"stdout: {e.stdout}")
+        print(f"stderr: {e.stderr}")
         return False
 
-def save_state(state):
-    """将当前状态保存到 state.json 文件。"""
-    try:
-        with open(STATE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(state, f, indent=4)
-        # print("状态已保存。") # 频繁保存时可以注释掉此行，避免刷屏
-    except IOError as e:
-        print(f"警告: 保存状态到 {STATE_FILE} 失败: {e}")
 
-def run_bot(config, state):
-    """运行机器人的主循环。"""
-    print("\n--- 机器人开始运行 (按 Ctrl+C 退出) ---")
-
-    # 如果状态是新创建的（没有上一期记录），则需要先获取一次初始结果
-    if not state.get('last_period_issue'):
-        print("未找到历史状态，正在获取初始开奖结果...")
-        while True:
-            initial_result = get_latest_result()
-            if initial_result:
-                state['last_period_issue'] = initial_result['issue']
-                state['last_period_sum'] = initial_result['sum']
-                state['last_award_time_str'] = initial_result['time']
-                print(f"获取到初始结果: 期号={state['last_period_issue']}, 和值={state['last_period_sum']}, 时间={state['last_award_time_str']}")
-                save_state(state) # 保存初始状态
-                break
-            else:
-                print(f"获取初始结果失败，{RETRY_INTERVAL_SECONDS} 秒后重试...")
-                time.sleep(RETRY_INTERVAL_SECONDS)
-    else:
-        print("成功从 state.json 加载历史状态。")
-
-    # 主循环
-    while True:
-        print("\n" + "="*50)
-        # 打印所有启用策略的当前状态
-        for name, strategy_state in state['strategies'].items():
-            print(f"策略 [{name}]: 连胜 {strategy_state['win_streak']} 场 | 下次下注金额 {strategy_state['current_bet']}")
-
-        # 1. 等待下注盘口开放
-        try:
-            API_TIMEZONE = timezone(timedelta(hours=8))
-            last_award_time_aware = datetime.strptime(f"{datetime.now().year}-{state['last_award_time_str']}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=API_TIMEZONE)
-            betting_opens_time_aware = last_award_time_aware + timedelta(seconds=BET_DELAY_SECONDS)
-            now_aware = datetime.now(API_TIMEZONE)
-            if now_aware < betting_opens_time_aware:
-                delay_duration = (betting_opens_time_aware - now_aware).total_seconds()
-                if delay_duration > 0:
-                    print(f"上一期结果已出，等待 {delay_duration:.1f} 秒以确保盘口开放...")
-                    time.sleep(delay_duration)
-        except (ValueError, KeyError) as e:
-            print(f"警告: 计算下注延迟时出错 ({e})。跳过延迟。")
-
-        # 2. 根据上一期结果，为所有启用的策略生成下注指令
-        bet_messages = []
-        last_sum = state['last_period_sum']
-        
-        # -- 大小策略 --
-        if config['strategies']['big_small']['enabled']:
-            bet_type = "大" if last_sum >= 14 else "小"
-            bet_amount = state['strategies']['big_small']['current_bet']
-            bet_messages.append(f"{bet_type}{bet_amount}")
-        
-        # -- 单双策略 --
-        if config['strategies']['odd_even']['enabled']:
-            bet_type = "双" if last_sum % 2 == 0 else "单"
-            bet_amount = state['strategies']['odd_even']['current_bet']
-            bet_messages.append(f"{bet_type}{bet_amount}")
-
-        if not bet_messages:
-            print("没有启用的下注策略，脚本将暂停。请使用 './run.sh config' 重新配置。")
-            break # 退出主循环
-
-        final_bet_message = " ".join(bet_messages)
-        print(f"根据上一期和值 [{last_sum}], 准备下注: {final_bet_message}")
-        if not send_bet_command(config['chat_id'], final_bet_message):
-            print(f"下注失败，将在 {RETRY_INTERVAL_SECONDS} 秒后重试...")
-            time.sleep(RETRY_INTERVAL_SECONDS)
-            continue
-
-        # 3. 等待下一期开奖
-        try:
-            API_TIMEZONE = timezone(timedelta(hours=8))
-            aware_last_award_time = datetime.strptime(f"{datetime.now().year}-{state['last_award_time_str']}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=API_TIMEZONE)
-            aware_next_award_time = aware_last_award_time + timedelta(seconds=AWARD_INTERVAL_SECONDS)
-            now_utc = datetime.now(timezone.utc)
-            next_award_time_utc = aware_next_award_time.astimezone(timezone.utc)
-            sleep_until_utc = next_award_time_utc - timedelta(seconds=POLL_AHEAD_SECONDS)
-            if now_utc < sleep_until_utc:
-                sleep_duration = (sleep_until_utc - now_utc).total_seconds()
-                display_next_award_time = next_award_time_utc.astimezone(API_TIMEZONE)
-                display_sleep_until = sleep_until_utc.astimezone(API_TIMEZONE)
-                print(f"下注成功。预计下期开奖时间 (UTC+8): {display_next_award_time.strftime('%H:%M:%S')}")
-                print(f"将休眠 {sleep_duration:.1f} 秒，到 {display_sleep_until.strftime('%H:%M:%S')} (UTC+8) 再开始轮询...")
-                time.sleep(sleep_duration)
-            else:
-                print("警告: 计算出的下次轮询时间已过或非常接近，立即开始轮询。")
-        except ValueError:
-            print(f"警告: 无法解析时间 '{state['last_award_time_str']}'。回退到固定时间等待。")
-            time.sleep(AWARD_INTERVAL_SECONDS - POLL_AHEAD_SECONDS if AWARD_INTERVAL_SECONDS > POLL_AHEAD_SECONDS else 60)
-
-        print("休眠结束，开始轮询新一期结果...")
-        new_result = None
-        while True:
-            result = get_latest_result()
-            if result and result['issue'] != state['last_period_issue']:
-                new_result = result
-                print(f"获取到新一期结果: 期号={new_result['issue']}, 和值={new_result['sum']}")
-                break
-            else:
-                current_issue = state['last_period_issue'] if not result else result['issue']
-                print(f"结果未更新 (当前期号 {current_issue})，{POLLING_INTERVAL_SECONDS} 秒后再次查询...")
-                time.sleep(POLLING_INTERVAL_SECONDS)
-        
-        # 4. 独立核对每个策略的输赢
-        new_sum = new_result['sum']
-        
-        # -- 大小策略 --
-        if config['strategies']['big_small']['enabled']:
-            strategy_state = state['strategies']['big_small']
-            last_bet_was_big = ("大" if last_sum >= 14 else "小") == "大"
-            new_result_was_big = new_sum >= 14
-            if last_bet_was_big == new_result_was_big:
-                print("策略 [大小]: [胜利!]")
-                strategy_state['win_streak'] += 1
-                if strategy_state['win_streak'] >= config['strategies']['big_small']['max_win_streak']:
-                    strategy_state['win_streak'] = 0
-                    strategy_state['current_bet'] = config['strategies']['big_small']['initial_bet']
-                else:
-                    strategy_state['current_bet'] *= 2
-            else:
-                print("策略 [大小]: [失败!]")
-                strategy_state['win_streak'] = 0
-                strategy_state['current_bet'] = config['strategies']['big_small']['initial_bet']
-
-        # -- 单双策略 --
-        if config['strategies']['odd_even']['enabled']:
-            strategy_state = state['strategies']['odd_even']
-            last_bet_was_even = ("双" if last_sum % 2 == 0 else "单") == "双"
-            new_result_was_even = new_sum % 2 == 0
-            if last_bet_was_even == new_result_was_even:
-                print("策略 [单双]: [胜利!]")
-                strategy_state['win_streak'] += 1
-                if strategy_state['win_streak'] >= config['strategies']['odd_even']['max_win_streak']:
-                    strategy_state['win_streak'] = 0
-                    strategy_state['current_bet'] = config['strategies']['odd_even']['initial_bet']
-                else:
-                    strategy_state['current_bet'] *= 2
-            else:
-                print("策略 [单双]: [失败!]")
-                strategy_state['win_streak'] = 0
-                strategy_state['current_bet'] = config['strategies']['odd_even']['initial_bet']
-
-        # 5. 更新全局状态
-        state['last_period_issue'] = new_result['issue']
-        state['last_period_sum'] = new_result['sum']
-        state['last_award_time_str'] = new_result['time']
-        
-        save_state(state)
-
-
-def load_state(config):
+def load_state(config: dict) -> dict:
     """加载状态，如果文件不存在或无效，则创建新状态。"""
-    if Path(STATE_FILE).is_file():
+    if STATE_FILE.is_file():
         try:
             with open(STATE_FILE, 'r', encoding='utf-8') as f:
                 state = json.load(f)
-            # 简单校验一下状态文件结构
-            if 'strategies' in state and 'big_small' in state['strategies']:
-                 return state
+            if 'strategies' in state:
+                return state
             else:
-                print(f"警告: 状态文件 {STATE_FILE} 格式不正确。将创建新状态。")
+                print(f"警告: 状态文件结构不正确，重建。")
         except (json.JSONDecodeError, IOError) as e:
-            print(f"警告: 读取状态文件 {STATE_FILE} 失败: {e}。将创建新状态。")
-    
-    # 如果文件不存在或读取失败，创建并返回一个全新的状态
+            print(f"警告: 读取状态失败: {e}，将创建新状态。")
+
+    # 构建初始策略状态（仅为启用策略创建条目）
     initial_strategies_state = {}
     for name, strategy_config in config['strategies'].items():
-        if strategy_config['enabled']:
+        if strategy_config.get('enabled'):
             initial_strategies_state[name] = {
                 'current_bet': strategy_config['initial_bet'],
                 'win_streak': 0
@@ -402,40 +191,305 @@ def load_state(config):
         'last_award_time_str': None,
     }
 
-def main():
-    """主函数"""
-    # 检查是否只进行配置
-    if '--config-only' in sys.argv:
-        print("--- 进入交互式配置模式 ---")
-        # 直接调用 initial_setup() 来强制进行重新配置
-        initial_setup()
-        print("\n配置完成。现在您可以使用 './run.sh start' 来启动机器人。")
-        sys.exit(0)
 
-    # 检查配置文件是否存在，如果不存在则提示用户
-    if not Path(CONFIG_FILE).is_file():
-        print("错误: 配置文件 'config.json' 不存在。")
-        print("请先运行 './run.sh config' 来进行初始化配置。")
-        sys.exit(1)
+def pick_random_account(config: dict):
+    """
+    从配置的账户池中随机选择一个“启用且已绑定chat_id”的账户。
+    返回 (alias, chat_id, display_name) 或 None
+    """
+    candidates = []
+    for acc in config.get('accounts', []):
+        if acc.get('enabled') and acc.get('chat_id'):
+            candidates.append(acc)
+    if not candidates:
+        return None
+    acc = random.choice(candidates)
+    return acc.get('alias'), str(acc.get('chat_id')), acc.get('display_name')
 
-    config = load_config()
-    
-    print("\n配置加载成功:")
-    print(f"  - 目标 Chat ID: {config['chat_id']}")
-    for name, strategy_config in config['strategies'].items():
-        if strategy_config['enabled']:
-            print(f"  - [{name}] 玩法已启用: 初始金额={strategy_config['initial_bet']}, 最大连胜={strategy_config['max_win_streak']}")
+
+class BotEngine:
+    """
+    轻量引擎：在后台线程运行，与 Web 面板交互：
+    - start(): 启动线程
+    - stop(): 优雅停止
+    - is_running: 运行状态
+    """
+    def __init__(self):
+        self._thread = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._running = False
+
+    @property
+    def is_running(self) -> bool:
+        with self._lock:
+            return self._running
+
+    def start(self):
+        with self._lock:
+            if self._running:
+                print("引擎已在运行")
+                return
+            self._stop_event.clear()
+            self._thread = threading.Thread(target=self._run_wrapper, name="Canada28BotEngine", daemon=True)
+            self._thread.start()
+            self._running = True
+            print("引擎已启动")
+
+    def stop(self):
+        with self._lock:
+            if not self._running:
+                print("引擎未在运行")
+                return
+            print("正在请求引擎停止...")
+            self._stop_event.set()
+        # 等待线程退出
+        if self._thread:
+            self._thread.join(timeout=5)
+        with self._lock:
+            self._running = False
+            self._thread = None
+        print("引擎已停止")
+
+    def _sleep_with_stop(self, seconds: float):
+        """可中断睡眠，便于快速停止"""
+        end = time.time() + max(0, seconds)
+        while not self._stop_event.is_set() and time.time() < end:
+            time.sleep(min(0.5, end - time.time()))
+
+    def _run_wrapper(self):
+        try:
+            self._run_loop()
+        except Exception as e:
+            print(f"引擎异常退出: {e}")
+        finally:
+            with self._lock:
+                self._running = False
+
+    def _run_loop(self):
+        print("\n--- 机器人开始运行 (Web面板可停止) ---")
+
+        config = load_config()
+        state = load_state(config)
+
+        # 1) 初始化：若无历史期号，则先获取一次初始结果
+        if not state.get('last_period_issue'):
+            print("未找到历史状态，正在获取初始开奖结果...")
+            while not self._stop_event.is_set():
+                initial_result = get_latest_result()
+                if initial_result:
+                    state['last_period_issue'] = initial_result['issue']
+                    state['last_period_sum'] = initial_result['sum']
+                    state['last_award_time_str'] = initial_result['time']
+                    print(f"获取到初始结果: 期号={state['last_period_issue']}, 和值={state['last_period_sum']}, 时间={state['last_award_time_str']}")
+                    save_state(state)
+                    break
+                else:
+                    print(f"获取初始结果失败，{RETRY_INTERVAL_SECONDS} 秒后重试...")
+                    self._sleep_with_stop(RETRY_INTERVAL_SECONDS)
+            if self._stop_event.is_set():
+                return
         else:
-            print(f"  - [{name}] 玩法已禁用。")
-    
-    # 从文件加载状态，或创建新状态
-    state = load_state(config)
-    
+            print("成功从 state.json 加载历史状态。")
+
+        # 主循环
+        while not self._stop_event.is_set():
+            print("\n" + "=" * 50)
+            # 打印策略状态
+            for name, strategy_state in state['strategies'].items():
+                print(f"策略 [{name}]: 连胜 {strategy_state['win_streak']} 场 | 下次下注金额 {strategy_state['current_bet']}")
+
+            # 2) 等待盘口开放
+            try:
+                API_TZ = timezone(timedelta(hours=8))
+                last_award_time_aware = datetime.strptime(f"{datetime.now().year}-{state['last_award_time_str']}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=API_TZ)
+                betting_opens_time_aware = last_award_time_aware + timedelta(seconds=BET_DELAY_SECONDS)
+                now_aware = datetime.now(API_TZ)
+                if now_aware < betting_opens_time_aware:
+                    delay_duration = (betting_opens_time_aware - now_aware).total_seconds()
+                    if delay_duration > 0:
+                        print(f"上一期结果已出，等待 {delay_duration:.1f} 秒以确保盘口开放...")
+                        self._sleep_with_stop(delay_duration)
+                        if self._stop_event.is_set():
+                            break
+            except (ValueError, KeyError) as e:
+                print(f"警告: 计算下注延迟时出错 ({e})。跳过延迟。")
+
+            # 3) 基于上一期结果组装下注文本（大小/单双）
+            bet_texts = []
+            last_sum = state['last_period_sum']
+
+            # 大小
+            if config['strategies']['big_small']['enabled']:
+                bet_type = "大" if (last_sum is not None and last_sum >= 14) else "小"
+                bet_amount = state['strategies']['big_small']['current_bet']
+                bet_texts.append(f"{bet_type}{bet_amount}")
+
+            # 单双
+            if config['strategies']['odd_even']['enabled']:
+                if last_sum is None:
+                    # 没有可参考和值，默认下“单1”
+                    bet_type = "单"
+                else:
+                    bet_type = "双" if (last_sum % 2 == 0) else "单"
+                bet_amount = state['strategies']['odd_even']['current_bet']
+                bet_texts.append(f"{bet_type}{bet_amount}")
+
+            if not bet_texts:
+                print("没有启用的下注策略。请在 Web 面板中启用策略后再启动。")
+                break
+
+            # 4) 按注独立随机账号逐条发送（每条下注文本独立随机选择一个账号）
+            for txt in bet_texts:
+                # 优先从账户池随机
+                picked = pick_random_account(config)
+                if picked:
+                    alias, chat_id, display_name = picked
+                    print(f"将使用账户[{display_name or alias}] 发送下注: {txt} -> chat_id={chat_id}")
+                    ok = send_bet_command(alias=alias, chat_id=chat_id, message=txt)
+                else:
+                    # 回退：旧版单 chat_id 兼容（无 -a，使用默认登录账户）
+                    legacy_chat = config.get('chat_id')
+                    if not legacy_chat:
+                        print("错误: 没有可用账户且未配置全局 chat_id，跳过本注。")
+                        ok = False
+                    else:
+                        print(f"账户池为空，使用全局 chat_id={legacy_chat} 发送下注(兼容模式): {txt}")
+                        ok = send_bet_command(alias=None, chat_id=str(legacy_chat), message=txt)
+
+                if not ok:
+                    print(f"下注发送失败: {txt}。将在 {RETRY_INTERVAL_SECONDS} 秒后继续流程。")
+                    self._sleep_with_stop(RETRY_INTERVAL_SECONDS)
+
+                if self._stop_event.is_set():
+                    break
+
+            if self._stop_event.is_set():
+                break
+
+            # 5) 等待下一期开奖的时间点
+            try:
+                API_TZ = timezone(timedelta(hours=8))
+                aware_last_award_time = datetime.strptime(f"{datetime.now().year}-{state['last_award_time_str']}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=API_TZ)
+                aware_next_award_time = aware_last_award_time + timedelta(seconds=AWARD_INTERVAL_SECONDS)
+                now_utc = datetime.now(timezone.utc)
+                next_award_time_utc = aware_next_award_time.astimezone(timezone.utc)
+                sleep_until_utc = next_award_time_utc - timedelta(seconds=POLL_AHEAD_SECONDS)
+                if now_utc < sleep_until_utc:
+                    sleep_duration = (sleep_until_utc - now_utc).total_seconds()
+                    display_next_award = next_award_time_utc.astimezone(API_TZ)
+                    display_sleep_until = sleep_until_utc.astimezone(API_TZ)
+                    print(f"下注阶段结束。预计下期开奖 (UTC+8): {display_next_award.strftime('%H:%M:%S')}")
+                    print(f"将休眠 {sleep_duration:.1f} 秒，到 {display_sleep_until.strftime('%H:%M:%S')} (UTC+8) 再开始轮询开奖结果...")
+                    self._sleep_with_stop(sleep_duration)
+                else:
+                    print("警告: 计算出的下次轮询时间已过或过近，立即开始轮询。")
+            except ValueError:
+                print(f"警告: 无法解析时间 '{state['last_award_time_str']}'。回退到固定时间等待。")
+                self._sleep_with_stop(max(0, AWARD_INTERVAL_SECONDS - POLL_AHEAD_SECONDS if AWARD_INTERVAL_SECONDS > POLL_AHEAD_SECONDS else 60))
+
+            if self._stop_event.is_set():
+                break
+
+            # 6) 轮询直到获取到新一期
+            print("开始轮询新一期结果...")
+            new_result = None
+            while not self._stop_event.is_set():
+                result = get_latest_result()
+                if result and result['issue'] != state['last_period_issue']:
+                    new_result = result
+                    print(f"新一期结果: 期号={new_result['issue']}, 和值={new_result['sum']}, 时间={new_result.get('time')}")
+                    break
+                else:
+                    current_issue = state['last_period_issue'] if not result else result['issue']
+                    print(f"结果未更新 (当前期号 {current_issue})，{POLLING_INTERVAL_SECONDS} 秒后再次查询...")
+                    self._sleep_with_stop(POLLING_INTERVAL_SECONDS)
+
+            if self._stop_event.is_set():
+                break
+
+            # 7) 判定输赢并更新策略状态
+            new_sum = new_result['sum']
+
+            # 大小
+            if config['strategies']['big_small']['enabled']:
+                strategy_state = state['strategies'].setdefault('big_small', {
+                    'current_bet': config['strategies']['big_small']['initial_bet'],
+                    'win_streak': 0
+                })
+                last_bet_was_big = ("大" if (last_sum is not None and last_sum >= 14) else "小") == "大"
+                new_result_was_big = new_sum >= 14
+                if last_bet_was_big == new_result_was_big:
+                    print("策略 [大小]: 胜利")
+                    strategy_state['win_streak'] += 1
+                    if strategy_state['win_streak'] >= config['strategies']['big_small']['max_win_streak']:
+                        strategy_state['win_streak'] = 0
+                        strategy_state['current_bet'] = config['strategies']['big_small']['initial_bet']
+                    else:
+                        strategy_state['current_bet'] *= 2
+                else:
+                    print("策略 [大小]: 失败")
+                    strategy_state['win_streak'] = 0
+                    strategy_state['current_bet'] = config['strategies']['big_small']['initial_bet']
+
+            # 单双
+            if config['strategies']['odd_even']['enabled']:
+                strategy_state = state['strategies'].setdefault('odd_even', {
+                    'current_bet': config['strategies']['odd_even']['initial_bet'],
+                    'win_streak': 0
+                })
+                last_bet_was_even = ("双" if (last_sum is not None and last_sum % 2 == 0) else "单") == "双"
+                new_result_was_even = new_sum % 2 == 0
+                if last_bet_was_even == new_result_was_even:
+                    print("策略 [单双]: 胜利")
+                    strategy_state['win_streak'] += 1
+                    if strategy_state['win_streak'] >= config['strategies']['odd_even']['max_win_streak']:
+                        strategy_state['win_streak'] = 0
+                        strategy_state['current_bet'] = config['strategies']['odd_even']['initial_bet']
+                    else:
+                        strategy_state['current_bet'] *= 2
+                else:
+                    print("策略 [单双]: 失败")
+                    strategy_state['win_streak'] = 0
+                    strategy_state['current_bet'] = config['strategies']['odd_even']['initial_bet']
+
+            # 8) 更新期号与时间
+            state['last_period_issue'] = new_result['issue']
+            state['last_period_sum'] = new_result['sum']
+            state['last_award_time_str'] = new_result.get('time', state['last_award_time_str'])
+            save_state(state)
+
+
+# 提供一个全局引擎单例，便于 Web 面板复用
+ENGINE = BotEngine()
+
+
+def main():
+    """
+    兼容 CLI 运行（不经 Web 面板）。为了简化：
+    - 不再交互式配置（initial_setup 移除），缺配置则生成默认配置。
+    - 直接前台运行引擎（Ctrl+C 退出）。
+    """
+    cfg = load_config()
+    print("\n配置加载成功:")
+    for name, strategy_config in cfg['strategies'].items():
+        status = "已启用" if strategy_config.get('enabled') else "已禁用"
+        print(f"  - [{name}] {status}: 初始金额={strategy_config['initial_bet']}, 最大连胜={strategy_config['max_win_streak']}")
+    if cfg.get("accounts"):
+        print(f"  - 账户池数量: {len(cfg['accounts'])}")
+    if cfg.get("chat_id"):
+        print(f"  - 兼容模式全局 chat_id: {cfg['chat_id']}")
+
     try:
-        run_bot(config, state)
+        ENGINE.start()
+        while ENGINE.is_running:
+            time.sleep(1)
     except KeyboardInterrupt:
-        print("\n\n检测到 Ctrl+C，程序已安全退出。")
-        sys.exit(0)
+        print("\n检测到 Ctrl+C，正在停止...")
+    finally:
+        ENGINE.stop()
+        print("程序已退出。")
+
 
 if __name__ == '__main__':
     main()
