@@ -6,12 +6,15 @@
 # bash -c "$(curl -fsSL https://raw.githubusercontent.com/paopaoandlingyia/install/main/install.sh)"
 #
 
+set -euo pipefail
+
 # --- 配置 ---
 # !!! 请将下面的地址替换为您自己仓库的 raw 文件地址 !!!
 REPO_BASE_URL="https://raw.githubusercontent.com/paopaoandlingyia/install/main"
 # 将文件直接安装到用户主目录
 INSTALL_DIR="$HOME"
-FILES_TO_DOWNLOAD=("run.sh" "canada28_bot.py")
+# 新增 web/app.py 以提供 Web 面板
+FILES_TO_DOWNLOAD=("run.sh" "canada28_bot.py" "web/app.py")
 
 # --- 颜色定义 ---
 C_RESET='\033[0m'
@@ -45,14 +48,18 @@ echo
 
 # 1. 创建并进入安装目录
 print_info "将在您的主目录 ('$INSTALL_DIR') 中安装机器人脚本..."
-# 确保主目录存在并进入
 mkdir -p "$INSTALL_DIR"
 cd "$INSTALL_DIR" || { print_error "无法进入主目录 '$INSTALL_DIR'。"; exit 1; }
 
-# 2. 下载必要的脚本文件
+# 2. 下载必要的脚本文件（自动创建子目录）
 print_info "正在从GitHub仓库下载脚本文件..."
 for file in "${FILES_TO_DOWNLOAD[@]}"; do
     print_info "  -> 下载 $file..."
+    # 为嵌套路径先创建目录
+    dir="$(dirname "$file")"
+    if [ "$dir" != "." ]; then
+        mkdir -p "$dir"
+    fi
     if ! curl -sSL "${REPO_BASE_URL}/${file}" -o "$file"; then
         print_error "下载 '$file' 失败。请检查您的网络连接和仓库URL。"
         exit 1
@@ -110,7 +117,6 @@ else
         exit 1
     fi
 
-    # 验证安装
     if ! command -v $PYTHON_CMD &> /dev/null; then
         print_error "安装后仍然无法找到 '$PYTHON_CMD' 命令。脚本无法继续。"
         exit 1
@@ -119,20 +125,20 @@ else
 fi
 
 # 5. 安装Python库
-print_info "正在使用 pip 安装必要的 Python 库 (tg-signer, requests)..."
+print_info "正在使用 pip 安装必要的 Python 库 (tg-signer, requests, fastapi, uvicorn)..."
 if [ -z "$PYTHON_CMD" ]; then
     print_error "未能确定要使用的 Python 命令，无法安装库。脚本无法继续。"
     exit 1
 fi
 
-if ! "$PYTHON_CMD" -m pip install -U tg-signer requests; then
+if ! "$PYTHON_CMD" -m pip install -U tg-signer requests fastapi "uvicorn[standard]"; then
     print_error "使用 pip 安装库失败。请检查pip配置和网络连接。"
     exit 1
 fi
 
 print_success "所有依赖库均已成功安装！"
 
-# 赋予运行脚本执行权限
+# 6. 脚本执行权限
 print_info "正在为 run.sh 添加执行权限..."
 chmod +x run.sh
 
@@ -140,23 +146,20 @@ echo
 echo "------------------------------------------------------------------"
 print_success "部署与环境配置全部完成!"
 echo
-print_info "下一步操作:"
-echo -e "1. ${C_YELLOW}请运行以下命令登录您的 Telegram 账户:${C_RESET}"
-echo -e "   (系统会提示您输入手机号、密码和验证码)"
-echo -e "   ${C_YELLOW}重要提示: 输入手机号时，请务必包含国家代码，例如: +861234567890${C_RESET}"
-echo -e "   ${C_GREEN}tg-signer login${C_RESET}"
+print_info "下一步操作（请按顺序执行）："
+echo -e "1. ${C_YELLOW}登录或添加多个 Telegram 账户（为每个账户自定义别名 alias）:${C_RESET}"
+echo -e "   示例: ${C_GREEN}tg-signer -a your_alias login${C_RESET}"
+echo -e "   提示: 输入手机号时请包含国家代码，例如 +861234567890"
 echo
-print_info "2. 登录成功后, 与您要下注的机器人进行一次任意对话。"
+print_info "2. 与目标机器人各发一条消息，以便生成最近对话列表。"
 echo
-print_info "3. ${C_YELLOW}运行配置命令来完成初始化设置:${C_RESET}"
-echo -e "   ${C_GREEN}./run.sh config${C_RESET}"
+print_info "3. 启动 Web 面板（前台运行，按 Ctrl+C 关闭）:"
+echo -e "   ${C_GREEN}./run.sh web${C_RESET}"
 echo
-print_info "4. ${C_YELLOW}使用以下命令来管理您的机器人:${C_RESET}"
-echo -e "   - 启动机器人 (后台运行): ${C_GREEN}./run.sh start${C_RESET}"
-echo -e "   - 查看实时日志: ${C_GREEN}./run.sh log${C_RESET}"
-echo -e "   - 查看运行状态: ${C_GREEN}./run.sh status${C_RESET}"
-echo -e "   - 停止机器人: ${C_GREEN}./run.sh stop${C_RESET}"
-echo -e "   - 配置机器人: ${C_GREEN}./run.sh config${C_RESET}"
+print_info "4. 在 Web 面板中完成以下配置："
+echo -e "   - 账户池：为每个 alias 绑定 chat_id（可点击“选择聊天”或下方“最近对话辅助”复制）"
+echo -e "   - 策略：勾选启用“大小/单双”，设置初始金额与最大连胜"
+echo -e "   - 启动机器人：点击“启动机器人”，运行中可随时“停止机器人”"
 echo "------------------------------------------------------------------"
 echo
 
