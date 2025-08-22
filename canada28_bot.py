@@ -47,8 +47,6 @@ DEFAULT_CONFIG = {
             "max_win_streak": 3
         }
     },
-    # 旧版单一 chat_id（兼容模式，无账户池时仍可使用）
-    "chat_id": None
 }
 
 
@@ -75,8 +73,9 @@ def ensure_default_config(cfg: dict) -> dict:
         cfg["strategies"].setdefault(k, {})
         for sk, sv in v.items():
             cfg["strategies"][k].setdefault(sk, sv)
-    # legacy chat_id
-    cfg.setdefault("chat_id", None)
+    # 移除旧的 chat_id 兼容字段
+    if "chat_id" in cfg:
+        del cfg["chat_id"]
     return cfg
 
 
@@ -230,11 +229,12 @@ class BotEngine:
             if self._running:
                 print("引擎已在运行")
                 return
+            print("准备启动引擎...")
             self._stop_event.clear()
+            self._running = True  # 在启动线程前就设置状态，防止并发
             self._thread = threading.Thread(target=self._run_wrapper, name="Canada28BotEngine", daemon=True)
             self._thread.start()
-            self._running = True
-            print("引擎已启动")
+            print(f"引擎线程已启动 (ID: {self._thread.ident})")
 
     def stop(self):
         with self._lock:
@@ -258,13 +258,16 @@ class BotEngine:
             time.sleep(min(0.5, end - time.time()))
 
     def _run_wrapper(self):
+        thread_id = threading.get_ident()
+        print(f"引擎运行循环开始 (线程 ID: {thread_id})")
         try:
             self._run_loop()
         except Exception as e:
-            print(f"引擎异常退出: {e}")
+            print(f"引擎异常退出 (线程 ID: {thread_id}): {e}")
         finally:
             with self._lock:
                 self._running = False
+            print(f"引擎运行循环结束 (线程 ID: {thread_id})")
 
     def _run_loop(self):
         print("\n--- 机器人开始运行 (Web面板可停止) ---")
@@ -348,18 +351,13 @@ class BotEngine:
                     print(f"将使用账户[{display_name or alias}] 发送下注: {txt} -> chat_id={chat_id}")
                     ok = send_bet_command(alias=alias, chat_id=chat_id, message=txt)
                 else:
-                    # 回退：旧版单 chat_id 兼容（无 -a，使用默认登录账户）
-                    legacy_chat = config.get('chat_id')
-                    if not legacy_chat:
-                        print("错误: 没有可用账户且未配置全局 chat_id，跳过本注。")
-                        ok = False
-                    else:
-                        print(f"账户池为空，使用全局 chat_id={legacy_chat} 发送下注(兼容模式): {txt}")
-                        ok = send_bet_command(alias=None, chat_id=str(legacy_chat), message=txt)
+                    print("错误: 账户池为空或所有可用账户均未绑定 chat_id，跳过本注。")
+                    ok = False
 
                 if not ok:
-                    print(f"下注发送失败: {txt}。将在 {RETRY_INTERVAL_SECONDS} 秒后继续流程。")
-                    self._sleep_with_stop(RETRY_INTERVAL_SECONDS)
+                    print(f"下注发送失败: {txt}。")
+                    # 失败后不再自动重试，等待下一轮
+
 
                 if self._stop_event.is_set():
                     break
@@ -477,8 +475,6 @@ def main():
         print(f"  - [{name}] {status}: 初始金额={strategy_config['initial_bet']}, 最大连胜={strategy_config['max_win_streak']}")
     if cfg.get("accounts"):
         print(f"  - 账户池数量: {len(cfg['accounts'])}")
-    if cfg.get("chat_id"):
-        print(f"  - 兼容模式全局 chat_id: {cfg['chat_id']}")
 
     try:
         ENGINE.start()
