@@ -153,13 +153,17 @@ echo -e "   提示: 输入手机号时请包含国家代码，例如 +8612345678
 echo
 print_info "2. 与目标机器人各发一条消息，以便生成最近对话列表。"
 echo
-print_info "3. 启动 Web 面板（前台运行，按 Ctrl+C 关闭）:"
-echo -e "   ${C_GREEN}./run.sh web${C_RESET}"
+print_info "3. 使用以下命令来管理您的 Web 面板:"
+echo -e "   - 启动面板 (后台运行): ${C_GREEN}./run.sh start${C_RESET}"
+echo -e "   - 查看实时日志: ${C_GREEN}./run.sh log${C_RESET}"
+echo -e "   - 查看运行状态: ${C_GREEN}./run.sh status${C_RESET}"
+echo -e "   - 停止面板: ${C_GREEN}./run.sh stop${C_RESET}"
+echo -e "   - 重启面板: ${C_GREEN}./run.sh restart${C_RESET}"
 echo
-print_info "4. 在 Web 面板中完成以下配置："
+print_info "4. 启动后，在浏览器中访问面板，并完成以下配置："
 echo -e "   - 账户池：为每个 alias 绑定 chat_id（可点击“选择聊天”或下方“最近对话辅助”复制）"
 echo -e "   - 策略：勾选启用“大小/单双”，设置初始金额与最大连胜"
-echo -e "   - 启动机器人：点击“启动机器人”，运行中可随时“停止机器人”"
+echo -e "   - 运行控制：点击“启动机器人”，机器人引擎将在后台运行"
 echo "------------------------------------------------------------------"
 echo
 
